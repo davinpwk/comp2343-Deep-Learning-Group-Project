@@ -6,6 +6,7 @@ by visualization scripts without pulling in the full Gym env / pygame stack.
 """
 
 import math
+from types import MappingProxyType
 import numpy as np
 
 
@@ -17,16 +18,45 @@ TILE_SIZE = 5
 
 
 # ---------------------------------------------------------------------------
-# Default track (the F1 Circuit from the original main.py)
+# Default track (the F1 Circuit from the original main.py).
+# Wrapped in MappingProxyType so accidental mutation from another module
+# fails loudly instead of silently corrupting later envs.
 # ---------------------------------------------------------------------------
-DEFAULT_TRACK = dict(
+DEFAULT_TRACK = MappingProxyType(dict(
     rows=1100, cols=3000,
     path_start=100, path_end=1000,
     base_center=1500, amplitude=400.0,
     width_center=20, width_swing=40,
-    spawn_row=120, exit_row=980,
-    grass_border=5,
-)
+    start_row=980, finish_row=120,
+    dirt_border=5,
+    finish_size=5,
+))
+
+
+def _validate_config(rows, cols, path_start, path_end,
+                     base_center, amplitude, width_center, width_swing,
+                     start_row, finish_row, dirt_border, finish_size):
+    if not (0 <= path_start < path_end < rows):
+        raise ValueError(
+            f"need 0 <= path_start < path_end < rows; "
+            f"got path_start={path_start}, path_end={path_end}, rows={rows}"
+        )
+    if not (0 <= base_center < cols):
+        raise ValueError(f"base_center={base_center} not in [0, cols={cols})")
+    if width_center < 1 or width_swing < 1:
+        raise ValueError("width_center and width_swing must be >= 1")
+    if not (path_start <= start_row <= path_end):
+        raise ValueError(
+            f"start_row={start_row} must lie within "
+            f"[path_start={path_start}, path_end={path_end}]"
+        )
+    if not (path_start <= finish_row <= path_end):
+        raise ValueError(
+            f"finish_row={finish_row} must lie within "
+            f"[path_start={path_start}, path_end={path_end}]"
+        )
+    if dirt_border < 0 or finish_size < 0:
+        raise ValueError("dirt_border and finish_size must be >= 0")
 
 
 # ---------------------------------------------------------------------------
@@ -37,17 +67,23 @@ def generate_winding_map(
         path_start=1, path_end=24,
         base_center=21, amplitude=4.5,
         width_center=3, width_swing=4,
-        spawn_row=23, exit_row=3,
-        grass_border=5,
+        start_row=23, finish_row=3,
+        dirt_border=5,
+        finish_size=5,
 ) -> np.ndarray:
     """Generate a winding race track as a (rows, cols) uint8 tile grid.
 
     Tile codes: 0=DIRT, 1=ROAD, 2=WALL, 3=START, 4=FINISH.
 
-    Quirk preserved from the original: the parameters `spawn_row` and
-    `exit_row` are reversed from what their names suggest. `exit_row` is the
-    row that gets the START tile; `spawn_row` is the row that gets FINISH.
+    The track is a sinusoidal road from `path_start` to `path_end`, capped
+    by dirt at either end. A single START tile is placed on `start_row`
+    (where the car spawns) and a square of FINISH tiles of half-width
+    `finish_size` is placed at `finish_row`.
     """
+    _validate_config(rows, cols, path_start, path_end,
+                     base_center, amplitude, width_center, width_swing,
+                     start_row, finish_row, dirt_border, finish_size)
+
     grid = np.full((rows, cols), WALL, dtype=np.uint8)
     path_len = path_end - path_start
 
@@ -60,7 +96,7 @@ def generate_winding_map(
         inner_right = round(base_center + offset + half)
 
         # Dirt border fanning out from the road
-        for i in range(grass_border + 1):
+        for i in range(dirt_border + 1):
             lc = inner_left - 1 - i
             rc = inner_right + 1 + i
             if 0 <= lc < cols: grid[row, lc] = DIRT
@@ -88,14 +124,13 @@ def generate_winding_map(
         offset = amplitude * math.sin(2 * math.pi * t)
         return round(base_center + offset)
 
-    if path_start <= exit_row <= path_end:
-        grid[exit_row, center_col(exit_row)] = START
-    if path_start <= spawn_row <= path_end:
-        cx = center_col(spawn_row)
-        for dr in range(-5, 6):
-            for dc in range(-5, 6):
-                r, c = spawn_row + dr, cx + dc
-                if 0 <= r < rows and 0 <= c < cols and grid[r, c] == ROAD:
-                    grid[r, c] = FINISH
+    grid[start_row, center_col(start_row)] = START
+
+    fx = center_col(finish_row)
+    for dr in range(-finish_size, finish_size + 1):
+        for dc in range(-finish_size, finish_size + 1):
+            r, c = finish_row + dr, fx + dc
+            if 0 <= r < rows and 0 <= c < cols and grid[r, c] == ROAD:
+                grid[r, c] = FINISH
 
     return grid
