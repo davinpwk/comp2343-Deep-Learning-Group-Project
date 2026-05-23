@@ -134,3 +134,45 @@ def generate_winding_map(
                 grid[r, c] = FINISH
 
     return grid
+
+
+# ---------------------------------------------------------------------------
+# Pre-built map file loader (for the maps/ directory).
+#
+# File format: ASCII grid of tile codes 0..4, one char per tile, no
+# separators. One line per row. Ragged lines are right-padded with WALL.
+# ---------------------------------------------------------------------------
+_VALID_TILES = {DIRT, ROAD, WALL, START, FINISH}
+
+
+def load_map_from_file(path) -> np.ndarray:
+    """Load a tile grid from a text file. Returns a (rows, cols) uint8 array."""
+    with open(path) as f:
+        lines = [ln.rstrip("\n") for ln in f if ln.strip()]
+    if not lines:
+        raise ValueError(f"Map file is empty: {path}")
+
+    parsed: list[list[int]] = []
+    for r, ln in enumerate(lines):
+        row: list[int] = []
+        for c, ch in enumerate(ln):
+            if not ch.isdigit():
+                raise ValueError(
+                    f"Non-digit character {ch!r} at row {r}, col {c} in {path}. "
+                    f"Maps must be packed digits 0-4 with no separators."
+                )
+            v = int(ch)
+            if v not in _VALID_TILES:
+                raise ValueError(
+                    f"Bad tile {v} at row {r}, col {c} in {path}; "
+                    f"valid codes are {sorted(_VALID_TILES)}."
+                )
+            row.append(v)
+        parsed.append(row)
+
+    rows = len(parsed)
+    cols = max(len(row) for row in parsed)
+    grid = np.full((rows, cols), WALL, dtype=np.uint8)
+    for r, row in enumerate(parsed):
+        grid[r, :len(row)] = row
+    return grid

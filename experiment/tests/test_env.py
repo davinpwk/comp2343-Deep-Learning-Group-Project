@@ -2,7 +2,7 @@
 Pytest suite for CarRacingEnv.
 
 Run:
-    pytest test_env.py -v
+    pytest experiment/tests/test_env.py -v
 
 These are intentionally cheap smoke tests, not a deep verification suite —
 the goal is to catch regressions in observation shape, reward sign, slip
@@ -10,7 +10,7 @@ observability, and termination semantics.
 """
 import numpy as np
 
-from car_env import CarRacingEnv, ACTION_NAMES
+from experiment.car_env import CarRacingEnv, ACTION_NAMES
 
 
 # === 1. Shape and space sanity ============================================

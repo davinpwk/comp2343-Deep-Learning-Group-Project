@@ -16,9 +16,9 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
-from track import (
+from .track import (
     DIRT, ROAD, WALL, START, FINISH, TILE_SIZE,
-    DEFAULT_TRACK, generate_winding_map,
+    DEFAULT_TRACK, generate_winding_map, load_map_from_file,
 )
 
 
@@ -163,7 +163,7 @@ class CarRacingEnv(gym.Env):
         accel: float = 0.15,
         accel_off_road: float = 0.08,
         coast_factor: float = 0.92,
-        reverse_throttle_cap: float = 0.5,
+        reverse_throttle_cap: float = 0.3,
         off_road_overspeed_decay: float = 0.85,
         centerline_lookahead: int = 10,
         render_mode: str = None,
@@ -173,8 +173,10 @@ class CarRacingEnv(gym.Env):
         screen_size: tuple = None,
         early_terminate_backward_pct: float = 0.0,
         early_terminate_stagnation_steps: int = 0,
-        align_spawn_to_tangent: bool = False,
+        align_spawn_to_tangent: bool = True,
         action_set: str = "no_noop",
+        track_array: np.ndarray = None,
+        map_path: str = None,
     ):
         super().__init__()
         # --- action set ---------------------------------------------------
@@ -185,9 +187,25 @@ class CarRacingEnv(gym.Env):
         self.action_set = action_set
         self.actions, self.action_names = ACTION_SETS[action_set]
         # --- track --------------------------------------------------------
-        cfg = {**DEFAULT_TRACK, **(track_config or {})}
-        self.track_cfg = cfg
-        self.track = generate_winding_map(**cfg)
+        # Three sources, in priority order:
+        #   1. track_array : an explicit (rows, cols) tile grid (fastest --
+        #      no I/O; used by MultiMapEnv to pre-load once and share).
+        #   2. map_path    : path to a packed-digit tile file (maps/*.txt).
+        #   3. track_config: procedural sinusoidal generator (legacy path).
+        # When (1) or (2) is used, the centerline is derived empirically
+        # from the road tiles in the loaded grid; track_config is ignored.
+        if track_array is not None and map_path is not None:
+            raise ValueError("Pass only one of track_array / map_path.")
+        if track_array is not None:
+            self.track = np.asarray(track_array, dtype=np.uint8).copy()
+            self.track_cfg = None
+        elif map_path is not None:
+            self.track = load_map_from_file(map_path)
+            self.track_cfg = None
+        else:
+            cfg = {**DEFAULT_TRACK, **(track_config or {})}
+            self.track_cfg = cfg
+            self.track = generate_winding_map(**cfg)
 
         # Spawn position. If multiple START tiles ever appear, the first
         # (row-major) wins -- single START is the documented assumption.
@@ -206,8 +224,13 @@ class CarRacingEnv(gym.Env):
         self.spawn_x = sc * TILE_SIZE + TILE_SIZE / 2
         self.spawn_y = sr * TILE_SIZE + TILE_SIZE / 2
 
-        # Centerline & cumulative arc length
-        self._build_centerline(cfg)
+        # Centerline & cumulative arc length. For procedurally-generated
+        # tracks we use the analytical sinusoidal centerline; for loaded
+        # maps we derive the centerline empirically from road tiles.
+        if self.track_cfg is not None:
+            self._build_centerline(self.track_cfg)
+        else:
+            self._build_centerline_from_array(sr)
 
         # --- spaces -------------------------------------------------------
         self.action_space = spaces.Discrete(len(self.actions))
@@ -306,6 +329,24 @@ class CarRacingEnv(gym.Env):
         self.slippery = bool(slippery)
         self.friction = self.friction_slippery if slippery else self.friction_normal
 
+    def set_friction(self, friction: float):
+        """Set the friction (velocity-retention) coefficient directly.
+
+        Higher = more slippery. Range is [0, 1); 1.0 would freeze physics.
+        Used by domain-randomization and curriculum experiments where
+        friction is sampled or scheduled outside the normal/slippery binary.
+        The `slippery` flag is derived from the value (>= 0.5 = "slippery")
+        so HUD/debug output stays meaningful.
+        """
+        friction = float(friction)
+        if not (0.0 <= friction < 1.0):
+            raise ValueError(
+                f"friction must be in [0, 1), got {friction!r}. "
+                f"1.0 is degenerate (target velocity never reached)."
+            )
+        self.friction = friction
+        self.slippery = friction >= 0.5
+
     def set_reward(self, **kwargs):
         """Update one or more reward weights. Same as env.rewards.update(...)."""
         for k, v in kwargs.items():
@@ -350,6 +391,82 @@ class CarRacingEnv(gym.Env):
                 "Degenerate centerline: total_arc <= 0. "
                 "Check start_row vs finish_row in track_config."
             )
+
+        self._cl_start_row = start_row
+        self._cl_direction = step
+        self._cl_n = len(cl)
+
+    def _build_centerline_from_array(self, start_row: int):
+        """Derive the centerline empirically from the loaded tile grid.
+
+        For each row containing road/finish tiles, take the midpoint of
+        those tiles (in column-space) as the row's centerline point. The
+        sequence starts at `start_row` (the row of the START tile) and
+        walks toward the FINISH-row in single-row steps, stopping at the
+        first row that is either out of bounds or contains no road.
+
+        The output has the same shape as `_build_centerline`'s — a (N, 2)
+        float32 array of (x_px, y_px) points plus cumulative arc lengths.
+        """
+        H = self.track.shape[0]
+
+        # Locate the finish row(s). FINISH is typically a block of tiles;
+        # we walk toward the block's nearest edge (the side that faces the
+        # start row), so a centerline of length-1 doesn't sneak through.
+        finish_locs = np.argwhere(self.track == FINISH)
+        if len(finish_locs) == 0:
+            raise ValueError(
+                "Loaded map has no FINISH tile (value 4); centerline "
+                "construction needs both START and FINISH."
+            )
+        finish_rows = finish_locs[:, 0]
+        # Direction: -1 if FINISH is above START (smaller row index), else +1.
+        if finish_rows.min() < start_row:
+            step = -1
+            target_row = int(finish_rows.max())
+        else:
+            step = 1
+            target_row = int(finish_rows.min())
+
+        rows = list(range(start_row, target_row + step, step))
+
+        pts: list[tuple[float, float]] = []
+        for r in rows:
+            if not (0 <= r < H):
+                break
+            row_tiles = self.track[r]
+            # Treat FINISH the same as ROAD for centerline purposes -- a
+            # finish tile is still drivable surface from the agent's view.
+            road_cols = np.flatnonzero((row_tiles == ROAD) | (row_tiles == FINISH))
+            if len(road_cols) == 0:
+                # No road in this row -- stop the walk. Don't silently
+                # interpolate; that would smuggle the centerline through
+                # a wall and give nonsense progress rewards.
+                break
+            mid_col = float(road_cols.mean())
+            pts.append((
+                mid_col * TILE_SIZE + TILE_SIZE / 2,
+                r * TILE_SIZE + TILE_SIZE / 2,
+            ))
+
+        if len(pts) < 2:
+            raise ValueError(
+                f"Empirical centerline has {len(pts)} point(s); need >= 2. "
+                f"Check START/FINISH tile placement in the loaded map."
+            )
+
+        cl = np.array(pts, dtype=np.float32)
+        self.centerline = cl
+
+        diffs = np.diff(cl, axis=0)
+        seg_lens = np.linalg.norm(diffs, axis=1)
+        self.centerline_arc = np.concatenate(
+            [[0.0], np.cumsum(seg_lens)]
+        ).astype(np.float32)
+        self.total_arc = float(self.centerline_arc[-1])
+
+        if self.total_arc <= 0.0:
+            raise ValueError("Degenerate empirical centerline (total_arc <= 0).")
 
         self._cl_start_row = start_row
         self._cl_direction = step
@@ -777,6 +894,7 @@ def keyboard_play(slippery: bool = False):
         action_set="full",
     )
     env.reset()
+    env.render()  # initialize pygame display before pumping events
     action_map = {ts: i for i, ts in enumerate(env.actions)}
     while True:
         for event in pygame.event.get():
@@ -790,6 +908,10 @@ def keyboard_play(slippery: bool = False):
         right = keys[pygame.K_d] or keys[pygame.K_RIGHT]
         throttle = 1 if up else (-1 if down else 0)
         steer    = -1 if left else (1 if right else 0)
+        # Reverse-while-steering isn't in the action set; clamp steer so the
+        # lookup doesn't KeyError when the user holds Down + Left/Right.
+        if throttle < 0:
+            steer = 0
         action = action_map[(throttle, steer)]
         _, _, terminated, truncated, _ = env.step(action)
         if terminated or truncated:
