@@ -882,16 +882,19 @@ class CarRacingEnv(gym.Env):
 # Demo / sanity check
 # ===========================================================================
 
-def keyboard_play(slippery: bool = False):
+def keyboard_play(slippery: bool = False, map_path: str | None = None):
     """Drive the env manually with W/A/S/D (or arrows). For sanity-checking.
 
     Uses action_set="full" so NOOP (no keys pressed) is a valid action;
     no_noop would crash here when the keys map to (0, 0).
+
+    If `map_path` is given, load that map file (e.g. maps/straight_turn.txt);
+    otherwise fall back to procedural generation via generate_winding_map.
     """
     import pygame
     env = CarRacingEnv(
         slippery=slippery, render_mode="human", max_steps=10_000,
-        action_set="full",
+        action_set="full", map_path=map_path,
     )
     env.reset()
     env.render()  # initialize pygame display before pumping events
@@ -941,7 +944,13 @@ def random_rollout(slippery: bool = False, render: bool = True, n_steps: int = 2
 
 if __name__ == "__main__":
     slip = "--slippery" in sys.argv
+    map_path = None
+    if "--map" in sys.argv:
+        i = sys.argv.index("--map")
+        if i + 1 >= len(sys.argv):
+            raise SystemExit("--map requires a path argument, e.g. --map maps/straight_turn.txt")
+        map_path = sys.argv[i + 1]
     if "--random" in sys.argv:
         random_rollout(slippery=slip)
     else:
-        keyboard_play(slippery=slip)
+        keyboard_play(slippery=slip, map_path=map_path)
