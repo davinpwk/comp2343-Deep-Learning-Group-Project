@@ -54,9 +54,9 @@ class ExperimentConfig:
     # Paths relative to project root. Episodes pick one map uniformly at
     # random; if a single path is given, that map is used every episode.
     map_paths: tuple = (
-        "maps/straight_turn.txt",
-        "maps/narrow_straight_wide_turn.txt",
-        "maps/wide_straight_narrow_turn.txt",
+        "maps/winding.txt",
+        "maps/winding_frequent.txt",
+        "maps/winding_varying_width.txt",
     )
 
     # === per-episode env knobs ========================================
@@ -72,10 +72,10 @@ class ExperimentConfig:
     lr: float = 5e-4
     batch_size: int = 64
     buffer_capacity: int = 100_000
-    target_update_freq: int = 500
+    target_update_freq: int = 3000
     epsilon_start: float = 1.0
     epsilon_end: float = 0.05
-    epsilon_decay_steps: int = 50_000
+    epsilon_decay_steps: int = 100_000
     hidden_sizes: tuple = (128, 128)
     grad_clip: float = 10.0
 

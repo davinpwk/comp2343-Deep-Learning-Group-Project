@@ -94,7 +94,7 @@ need for a CNN.
 
 | idx   | feature              | meaning                                                                                                                                                                                          |
 |-------|----------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 0..6  | `ray_0..6`           | distance to nearest non-road tile along each of 7 LIDAR rays, / `ray_max_dist`. `1.0` = nothing within range. Rays at angles `[-90, -45, -20, 0, +20, +45, +90]` degrees from the car's heading. |
+| 0..6  | `ray_0..6`           | distance to nearest **wall** tile along each of 7 LIDAR rays, / `ray_max_dist`. `1.0` = nothing within range. Rays pass through dirt — road-edge info comes from `is_off_road` and `distance_to_center` instead. Angles `[-90, -45, -20, 0, +20, +45, +90]` degrees from the car's heading. |
 | 7     | `speed`              | signed speed / `CAR_SPEED`. Approx. range [-0.5, 1].                                                                                                                                             |
 | 8     | `fwd_vel`            | actual velocity projected onto the car's heading axis / `CAR_SPEED`.                                                                                                                             |
 | 9     | `lat_vel`            | actual velocity projected onto the car's right axis / `CAR_SPEED`. **Non-zero when sliding** — this is the feature that lets the agent "see" slip.                                               |

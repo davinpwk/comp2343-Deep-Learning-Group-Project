@@ -3,9 +3,9 @@
 ## 1. Environments
 
 Three tracks already exist as text files in `maps/`:
-- `straight_turn.txt` (T1 — reference layout)
-- `narrow_straight_wide_turn.txt` (T2)
-- `wide_straight_narrow_turn.txt` (T3)
+- `winding.txt` (T1 — reference layout)
+- `winding_frequent.txt` (T2 — frequent smooth winding; replaced the original triangle-wave zigzag, which was too hard to learn)
+- `winding_varying_width.txt` (T3)
 
 During training, sample a map uniformly at random per episode. Spawn position and heading remain at env defaults (no randomization).
 

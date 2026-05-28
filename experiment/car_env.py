@@ -88,10 +88,10 @@ N_EXTRA_OBS = 6
 # Default reward weights. Mutable at runtime: env.rewards["wall_hit"] = -100
 # ---------------------------------------------------------------------------
 DEFAULT_REWARDS = dict(
-    progress=3.0,    # multiplied by Δ arc-length per step
-    time=-0.05,      # flat per-step time penalty
-    off_road=-3.0,   # added each step the car is on dirt
-    wall_hit=-10.0,  # one-shot, ends the episode
+    progress=1.0,    # multiplied by Δ arc-length per step
+    time=-1.0,      # flat per-step time penalty
+    off_road=-30.0,   # added each step the car is on dirt
+    wall_hit=-50.0,  # one-shot, ends the episode
     finish=100.0,    # one-shot, ends the episode
 )
 
@@ -103,7 +103,9 @@ class CarRacingEnv(gym.Env):
         [ray_0, ..., ray_{N-1}, speed, fwd_vel, lat_vel,
          is_off_road, angle_to_center, distance_to_center]
 
-        ray_i              distance to nearest non-road tile / ray_max_dist (in [0, 1])
+        ray_i              distance to nearest WALL tile / ray_max_dist (in [0, 1]).
+                           Rays pass through dirt; the agent gets `is_off_road`
+                           and `distance_to_center` for the road-edge signal.
         speed              signed speed scalar / CAR_SPEED                  (in ~[-0.5, 1])
         fwd_vel            actual velocity · heading / CAR_SPEED            (forward slip)
         lat_vel            actual velocity · right-axis / CAR_SPEED         (lateral slip)
@@ -170,6 +172,7 @@ class CarRacingEnv(gym.Env):
         render_fps: int = 60,
         track_config: dict = None,
         show_rays_on_render: bool = True,
+        show_centerline_on_render: bool = True,
         screen_size: tuple = None,
         early_terminate_backward_pct: float = 0.0,
         early_terminate_stagnation_steps: int = 0,
@@ -297,6 +300,7 @@ class CarRacingEnv(gym.Env):
         self.render_mode = render_mode
         self.render_fps = render_fps
         self.show_rays_on_render = show_rays_on_render
+        self.show_centerline_on_render = show_centerline_on_render
         self._pygame = None         # cached module handle after first import
         self._screen = None
         self._font = None
@@ -473,11 +477,41 @@ class CarRacingEnv(gym.Env):
         self._cl_n = len(cl)
 
     def _arc_at(self, x: float, y: float) -> float:
-        # Centerline is monotonic in row, so use y as a direct index.
+        """Arc-length of the centerline at the point closest to (x, y).
+
+        Uses the y-coordinate to seed an approximate centerline index
+        (the centerline is one polyline point per road-bearing tile row,
+        so this is O(1)), then projects (x, y) onto each segment in a
+        small window around that index and returns the interpolated
+        arc-length of the closest projection. Result: smooth arc-length
+        everywhere — no tile-row quantization, no horizontal-segment
+        blind spot from the old y-only lookup.
+        """
         row = y / TILE_SIZE
         idx_f = (row - self._cl_start_row) / self._cl_direction
-        idx = int(np.clip(idx_f, 0, self._cl_n - 1))
-        return float(self.centerline_arc[idx])
+        idx_approx = int(np.clip(idx_f, 0, self._cl_n - 1))
+
+        # Segments are centerline[i] -> centerline[i+1], so valid
+        # segment-start indices are [0, _cl_n - 2]. W=3 covers far more
+        # displacement than the car can travel in one step.
+        W = 3
+        lo = max(0, idx_approx - W)
+        hi = min(self._cl_n - 2, idx_approx + W)
+
+        a   = self.centerline[lo:hi + 1]                          # (k, 2)
+        b   = self.centerline[lo + 1:hi + 2]                      # (k, 2)
+        ab  = b - a                                               # (k, 2)
+        abl = (ab * ab).sum(axis=1)                               # (k,)
+        p   = np.array([x, y], dtype=self.centerline.dtype)
+        t   = ((p - a) * ab).sum(axis=1) / np.maximum(abl, 1e-9)  # (k,)
+        t   = np.clip(t, 0.0, 1.0)
+        proj = a + t[:, None] * ab                                # (k, 2)
+        d2   = ((p - proj) ** 2).sum(axis=1)                      # (k,)
+        best = int(np.argmin(d2))
+
+        arc_lo = self.centerline_arc[lo + best]
+        arc_hi = self.centerline_arc[lo + best + 1]
+        return float(arc_lo + t[best] * (arc_hi - arc_lo))
 
     def _tile_at(self, x: float, y: float) -> int:
         c = int(x // TILE_SIZE)
@@ -488,7 +522,20 @@ class CarRacingEnv(gym.Env):
         return WALL
 
     def _cast_rays(self) -> np.ndarray:
-        """Vectorized LIDAR — pure-math raycast against the tile grid."""
+        """Vectorized LIDAR — pure-math raycast against the tile grid.
+
+        A ray hits on the **first non-drivable tile** it encounters: WALL,
+        DIRT, or off-the-map. ROAD and FINISH are pass-through. This gives
+        the agent rays-to-road-boundary rather than rays-to-wall, so it
+        can perceive the dirt edge of the track directly.
+
+        Caveat: when the car is already on dirt, rays will read very
+        small distances in every direction (the immediate samples are
+        themselves dirt). The agent gets that information separately via
+        `is_off_road` and `distance_to_centerline` in the obs vector, but
+        be aware the ray signal degrades to "I'm surrounded by off-road"
+        until the car gets back on the road.
+        """
         angles_rad = np.radians(self.car_angle + self.ray_angles)
         dx = np.sin(angles_rad)
         dy = -np.cos(angles_rad)
@@ -504,7 +551,7 @@ class CarRacingEnv(gym.Env):
         cs_clip = np.clip(cs, 0, W - 1)
         rs_clip = np.clip(rs, 0, H - 1)
         tiles = self.track[rs_clip, cs_clip]
-        hit = (tiles != ROAD) | (~in_bounds)
+        hit = (tiles == WALL) | (tiles == DIRT) | (~in_bounds)
 
         any_hit = hit.any(axis=1)
         first_idx = np.argmax(hit, axis=1)
@@ -813,6 +860,16 @@ class CarRacingEnv(gym.Env):
         # pygame.surfarray expects (W, H, 3)
         self._track_surf = pygame.surfarray.make_surface(big.transpose(1, 0, 2))
 
+        # Bake the centerline polyline into the track surface — visualises
+        # the curve that drives r_progress and the angle/distance-to-centre
+        # observation features. One-time draw; no per-frame cost.
+        if (self.show_centerline_on_render
+                and self.centerline is not None
+                and len(self.centerline) >= 2):
+            CL_COL = (255, 220, 0)  # vivid yellow, contrasts with asphalt
+            pts = [(float(p[0]), float(p[1])) for p in self.centerline]
+            pygame.draw.aalines(self._track_surf, CL_COL, False, pts)
+
     def _draw_frame(self):
         pygame = self._ensure_pygame()
         screen = self._screen
@@ -844,19 +901,24 @@ class CarRacingEnv(gym.Env):
                        self.car_angle)
 
         # HUD
-        hud = pygame.Surface((320, 130), pygame.SRCALPHA)
+        hud = pygame.Surface((360, 170), pygame.SRCALPHA)
         hud.fill((0, 0, 0, 170))
         screen.blit(hud, (10, 10))
         mode_str = "SLIPPERY" if self.slippery else "NORMAL"
         progress_pct = (self.prev_arc / self.total_arc * 100) if self.total_arc > 0 else 0
         progress_pct = min(progress_pct, 100.0)
+        # Same values that get fed to the agent as obs features.
+        angle_to_center = self._angle_to_centerline()     # in [-1, 1] = rad/pi
+        dist_to_center  = self._distance_to_centerline()  # in [0, 1]
         lines = [
-            (f"mode:     {mode_str}",       self.WHITE),
-            (f"step:     {self.steps}",      self.WHITE),
-            (f"action:   {self.action_names[self._last_action]}", self.WHITE),
-            (f"reward:   {self._last_reward:+.2f}",          self.FINISH_COL),
-            (f"progress: {progress_pct:.1f}%",               self.WHITE),
-            (f"speed:    {self.speed:.2f}",                  self.WHITE),
+            (f"mode:     {mode_str}",                                 self.WHITE),
+            (f"step:     {self.steps}",                               self.WHITE),
+            (f"action:   {self.action_names[self._last_action]}",     self.WHITE),
+            (f"reward:   {self._last_reward:+.2f}",                   self.FINISH_COL),
+            (f"progress: {progress_pct:.1f}%",                        self.WHITE),
+            (f"speed:    {self.speed:.2f}",                           self.WHITE),
+            (f"∠center:  {angle_to_center * 180:+6.1f}°  ({angle_to_center:+.2f})", self.WHITE),
+            (f"d center: {dist_to_center:.3f}",                       self.WHITE),
         ]
         for i, (txt, col) in enumerate(lines):
             screen.blit(self._font.render(txt, 1, col), (20, 15 + i * 18))
@@ -888,7 +950,7 @@ def keyboard_play(slippery: bool = False, map_path: str | None = None):
     Uses action_set="full" so NOOP (no keys pressed) is a valid action;
     no_noop would crash here when the keys map to (0, 0).
 
-    If `map_path` is given, load that map file (e.g. maps/straight_turn.txt);
+    If `map_path` is given, load that map file (e.g. maps/winding_frequent.txt);
     otherwise fall back to procedural generation via generate_winding_map.
     """
     import pygame
@@ -948,7 +1010,7 @@ if __name__ == "__main__":
     if "--map" in sys.argv:
         i = sys.argv.index("--map")
         if i + 1 >= len(sys.argv):
-            raise SystemExit("--map requires a path argument, e.g. --map maps/straight_turn.txt")
+            raise SystemExit("--map requires a path argument, e.g. --map maps/winding_frequent.txt")
         map_path = sys.argv[i + 1]
     if "--random" in sys.argv:
         random_rollout(slippery=slip)

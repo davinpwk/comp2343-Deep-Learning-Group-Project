@@ -44,9 +44,9 @@ from experiment.train import train
 
 
 MAPS = [
-    "maps/straight_turn.txt",
-    "maps/narrow_straight_wide_turn.txt",
-    "maps/wide_straight_narrow_turn.txt",
+    "maps/winding.txt",
+    "maps/winding_frequent.txt",
+    "maps/winding_varying_width.txt",
 ]
 
 
