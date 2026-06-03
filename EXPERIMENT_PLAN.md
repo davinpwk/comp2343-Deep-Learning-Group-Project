@@ -9,11 +9,11 @@ Three tracks already exist as text files in `maps/`:
 
 During training, sample a map uniformly at random per episode. Spawn position and heading remain at env defaults (no randomization).
 
-**Friction settings used across the plan** (higher value = more slippery, per `car_env.py:130-135`):
-- Normal: `friction = 0.1`
-- Slippery: `friction = 0.95`
-- Domain randomization: `friction ~ Uniform(0.1, 0.95)` per episode
-- Curriculum: `friction` schedule from 0.1 → 0.95 over fine-tune budget
+**Friction settings used across the plan** (`friction` = grip coefficient, higher value = more grip / less slip, per `car_env.py`):
+- Normal: `friction = 0.9`
+- Slippery: `friction = 0.05`
+- Domain randomization: `friction ~ Uniform(0.05, 0.9)` per episode
+- Curriculum: `friction` schedule from 0.9 → 0.05 over fine-tune budget
 
 ## 2. Budget anchoring (do this first)
 
@@ -31,9 +31,9 @@ Set the budget unit:
 
 | Name | Training data | Budget |
 |---|---|---|
-| **B-normal** | friction = 0.1 | N |
-| **B-slippery** | friction = 0.95 | 2N (matched-compute) |
-| **B-DR** | friction ~ U(0.1, 0.95) | 2N (matched-compute) |
+| **B-normal** | friction = 0.9 | N |
+| **B-slippery** | friction = 0.05 | 2N (matched-compute) |
+| **B-DR** | friction ~ U(0.05, 0.9) | 2N (matched-compute) |
 
 B-normal serves dual duty: baseline *and* source of pretrained checkpoints for the transfer experiments.
 
@@ -43,12 +43,12 @@ All start from a B-normal checkpoint. Four conditions form a 2×2 ablation:
 
 | | Full fine-tune | Freeze first layer |
 |---|---|---|
-| **Direct transfer** (friction jumps 0.1 → 0.95) | E1 | E2 |
-| **Curriculum transfer** (friction 0.1 → 0.95 linear) | E3 | E4 |
+| **Direct transfer** (friction jumps 0.9 → 0.05) | E1 | E2 |
+| **Curriculum transfer** (friction 0.9 → 0.05 linear) | E3 | E4 |
 
 Each fine-tune uses budget `N`. Total compute per transfer condition: `N (pretrain) + N (fine-tune) = 2N`, matching the baseline budgets.
 
-**Curriculum schedule:** linear ramp of `env.friction` from 0.1 to 0.95 over the `N` fine-tune steps. One fixed schedule — do not search over schedules; that's a separate research question.
+**Curriculum schedule:** linear ramp of `env.friction` from 0.9 to 0.05 over the `N` fine-tune steps. One fixed schedule — do not search over schedules; that's a separate research question.
 
 ## 5. Hyperparameter search
 
@@ -188,7 +188,7 @@ For each of E1 (direct, full), E2 (direct, freeze-1st), E3 (curriculum, full), E
 - For each fine-tune HP config × 3 validation seeds:
   - Load the pretrained checkpoint matching the seed (one of the three from §2.3).
   - Apply freeze logic if applicable.
-  - Run the fine-tune for `N` env steps under the appropriate friction regime (constant 0.95 for direct, linear ramp for curriculum).
+  - Run the fine-tune for `N` env steps under the appropriate friction regime (constant 0.05 for direct, linear ramp for curriculum).
 - Pick the winning config per condition by AUC on slippery eval.
 
 ## Phase 3 — Final evaluation

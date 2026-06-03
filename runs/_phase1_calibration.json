@@ -1,0 +1,17 @@
+{
+  "N": 150000,
+  "X": 4000,
+  "N_norm": 150000,
+  "N_slip": 300000,
+  "asymptote_normal": 6476.107461484275,
+  "asymptote_slippery": 418.5508198420206,
+  "pilot": {
+    "seed": 0,
+    "max_env_steps": 1000000,
+    "eval_every": 5000,
+    "eval_n_ep": 1,
+    "slippery_run": "phase1_pilot_slippery",
+    "normal_run": "phase1_pilot_normal"
+  },
+  "notes": "OK: 2 * N_norm (300,000) >= N_slip (300,000). No bump needed."
+}

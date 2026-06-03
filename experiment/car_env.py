@@ -2,8 +2,8 @@
 Car racing environment for Deep Q-Network and transfer learning experiments.
 
 Two surface modes, controlled by the `slippery` flag at construction:
-  - slippery=False : grippy road  (friction = 0.1)  -- pretraining mode
-  - slippery=True  : icy road     (friction = 0.95) -- transfer-target mode
+  - slippery=False : grippy road  (friction = 0.9)  -- pretraining mode
+  - slippery=True  : icy road     (friction = 0.05) -- transfer-target mode
 
 Everything else (track layout, physics constants, action space, observation
 shape) stays identical across the two modes so the *only* difference your
@@ -130,10 +130,12 @@ class CarRacingEnv(gym.Env):
     is_off_road, wall_hit, finish, progress_pct, speed, car_x, car_y,
     car_angle. Useful for plotting "where the reward is coming from".
 
-    Friction convention: `friction` is the *retention* coefficient of the
-    previous velocity (so higher = MORE slippery, since less of the
-    target-velocity is blended in each step). Indexing names "slip" might
-    be more intuitive, but `friction` is preserved for backward compat.
+    Friction convention: `friction` is the *grip* coefficient — the
+    fraction of the target velocity blended into the actual velocity each
+    step (so higher = MORE grip / LESS slip). At friction=1.0 the velocity
+    snaps to the heading instantly (perfect grip); as friction -> 0 the car
+    keeps sliding along its old velocity (icy). This matches the real-world
+    intuition that higher friction means more grip.
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
@@ -157,8 +159,8 @@ class CarRacingEnv(gym.Env):
         max_steps: int = 3000,
         ray_angles=DEFAULT_RAY_ANGLES,
         ray_max_dist: float = 200.0,
-        friction_normal: float = 0.1,
-        friction_slippery: float = 0.95,
+        friction_normal: float = 0.9,
+        friction_slippery: float = 0.05,
         car_speed: float = 4.5,
         off_road_speed: float = 1.8,
         turn_speed: float = 4.0,
@@ -334,22 +336,22 @@ class CarRacingEnv(gym.Env):
         self.friction = self.friction_slippery if slippery else self.friction_normal
 
     def set_friction(self, friction: float):
-        """Set the friction (velocity-retention) coefficient directly.
+        """Set the friction (grip) coefficient directly.
 
-        Higher = more slippery. Range is [0, 1); 1.0 would freeze physics.
-        Used by domain-randomization and curriculum experiments where
-        friction is sampled or scheduled outside the normal/slippery binary.
-        The `slippery` flag is derived from the value (>= 0.5 = "slippery")
-        so HUD/debug output stays meaningful.
+        Higher = more grip (less slip). Range is (0, 1]; 0.0 would freeze
+        physics. Used by domain-randomization and curriculum experiments
+        where friction is sampled or scheduled outside the normal/slippery
+        binary. The `slippery` flag is derived from the value
+        (<= 0.5 = "slippery") so HUD/debug output stays meaningful.
         """
         friction = float(friction)
-        if not (0.0 <= friction < 1.0):
+        if not (0.0 < friction <= 1.0):
             raise ValueError(
-                f"friction must be in [0, 1), got {friction!r}. "
-                f"1.0 is degenerate (target velocity never reached)."
+                f"friction must be in (0, 1], got {friction!r}. "
+                f"0.0 is degenerate (target velocity never reached)."
             )
         self.friction = friction
-        self.slippery = friction >= 0.5
+        self.slippery = friction <= 0.5
 
     def set_reward(self, **kwargs):
         """Update one or more reward weights. Same as env.rewards.update(...)."""
@@ -693,9 +695,11 @@ class CarRacingEnv(gym.Env):
         target_vx = math.sin(rad) * self.speed
         target_vy = -math.cos(rad) * self.speed
 
-        # Slippery blend: velocity is pulled toward target, more slowly when icy
-        self.vel_x = self.vel_x * self.friction + target_vx * (1 - self.friction)
-        self.vel_y = self.vel_y * self.friction + target_vy * (1 - self.friction)
+        # Grip blend: velocity is pulled toward target by `friction`. Low
+        # friction keeps more of the old velocity, so the car slides (icy);
+        # high friction snaps to the heading (grippy).
+        self.vel_x = self.vel_x * (1 - self.friction) + target_vx * self.friction
+        self.vel_y = self.vel_y * (1 - self.friction) + target_vy * self.friction
 
         nx = self.car_x + self.vel_x
         ny = self.car_y + self.vel_y

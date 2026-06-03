@@ -234,8 +234,8 @@ dominating everything else.
 ## Slippery toggle
 
 ```python
-pretrain_env = CarRacingEnv(slippery=False)   # friction = 0.1 (grippy)
-transfer_env = CarRacingEnv(slippery=True)    # friction = 0.95 (icy)
+pretrain_env = CarRacingEnv(slippery=False)   # friction = 0.9 (grippy)
+transfer_env = CarRacingEnv(slippery=True)    # friction = 0.05 (icy)
 ```
 
 Or flip an existing env without rebuilding:
@@ -244,16 +244,16 @@ Or flip an existing env without rebuilding:
 env.set_slippery(True)
 ```
 
-The math: `vel = vel * friction + target_vel * (1 - friction)`. With
-`friction = 0.1` the actual velocity follows the heading within ~3 ticks.
-With `friction = 0.95` the velocity persists for ~20+ ticks — turning
+The math: `vel = vel * (1 - friction) + target_vel * friction`. With
+`friction = 0.9` the actual velocity follows the heading within ~3 ticks.
+With `friction = 0.05` the velocity persists for ~20+ ticks — turning
 the wheel rotates the chassis but the car keeps sliding in the previous
 direction. That's the icy feel.
 
-The naming is admittedly inverted — higher `friction` = more slippery,
-because it's the *retention coefficient* of the previous velocity. Both
-values are constructor params (`friction_normal`, `friction_slippery`)
-if I want to tune them.
+`friction` is the *grip* coefficient — the fraction of the target
+velocity blended in each step — so higher `friction` = more grip / less
+slip, matching the real-world intuition. Both values are constructor
+params (`friction_normal`, `friction_slippery`) if I want to tune them.
 
 ---
 

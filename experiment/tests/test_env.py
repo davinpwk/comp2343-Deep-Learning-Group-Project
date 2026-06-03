@@ -50,8 +50,8 @@ def test_progress_sign_positive():
 
 
 # === 3. Slippery vs Normal: lateral velocity is observably larger ========
-# The 3x multiplier below is empirical: with friction_normal=0.1 vs
-# friction_slippery=0.95, after 20 steps of UP+RIGHT at speed, slippery
+# The 3x multiplier below is empirical: with friction_normal=0.9 vs
+# friction_slippery=0.05, after 20 steps of UP+RIGHT at speed, slippery
 # typically shows ~4-7x more lateral drift. 3x is a comfortable floor that
 # survives small physics tuning without losing test sensitivity.
 def test_slip_observability():

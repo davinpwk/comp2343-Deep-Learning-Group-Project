@@ -30,7 +30,7 @@ from .env_utils import (
     build_eval_env_set,
     close_eval_env_set,
 )
-from .evaluate import evaluate
+from .evaluate import evaluate, aggregate_by_friction
 from .run_io import (
     run_dir,
     save_config,
@@ -107,6 +107,7 @@ def train(
         friction_provider=friction_provider,
         env_kwargs=env_kwargs,
         seed=cfg.seed,
+        map_sampling=cfg.map_sampling,
     )
 
     # Pre-build one env per map for the eval harness. Map files load once
@@ -154,7 +155,7 @@ def train(
         print(f"  Budget  : {cfg.max_env_steps:,} env steps")
         print(f"  Friction: {cfg.friction_mode} "
               f"(value={cfg.friction if cfg.friction_mode == 'fixed' else 'dynamic'})")
-        print(f"  Maps    : {len(cfg.map_paths)}")
+        print(f"  Maps    : {len(cfg.map_paths)} ({cfg.map_sampling} sampling)")
         print(f"  Pretrained: {pretrained_ckpt or '-'}")
         print(f"  Freeze first layer: {freeze_first}")
         print("=" * 60)
@@ -208,9 +209,24 @@ def train(
                     "cells":         serialise_eval_cells(cells),
                 }
                 append_jsonl(eval_log_path, rec)
+                if cfg.save_checkpoint_every_eval:
+                    # Zero-padded so the per-checkpoint files sort in step order.
+                    save_checkpoint(
+                        cfg, agent,
+                        name=f"ckpt_step_{env_steps:09d}.pt",
+                        extra={"env_steps": env_steps, "episodes": episodes},
+                    )
                 if verbose:
+                    # Report the mean return ACROSS ALL MAPS per friction
+                    # (matching the calibration plot), plus the spread across
+                    # maps. Printing a single map (e.g. map_paths[0]) hides
+                    # per-map generalisation gaps -- a policy can ace one map
+                    # and crash on the others while the headline number looks
+                    # flat. The ±spread makes that disagreement visible here.
+                    by_f = aggregate_by_friction(cells)
                     msg = "  ".join(
-                        f"f={f:.2f}:{cells.get((cfg.map_paths[0], f), {}).get('return_mean', float('nan')):+.1f}"
+                        f"f={f:.2f}:{by_f.get(f, {}).get('return_mean', float('nan')):+.1f}"
+                        f"±{by_f.get(f, {}).get('return_std_across_maps', float('nan')):.0f}"
                         for f in cfg.eval_frictions
                     )
                     print(f"  [eval @ {env_steps:>8,}] {msg}")
@@ -229,6 +245,9 @@ def train(
                     "finish":      bool(info.get("finish", False)),
                     "crash":       bool(info.get("wall_hit", False)),
                     "epsilon":     last_update_info.get("epsilon", agent.epsilon),
+                    # Cumulative env-steps per map -- lets us confirm the
+                    # buffer is balancing across maps under map_sampling.
+                    "map_steps":   multi_env.map_steps,
                 })
                 if verbose and episodes % 20 == 0:
                     elapsed = time.time() - t0

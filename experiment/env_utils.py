@@ -32,7 +32,7 @@ from .car_env import CarRacingEnv
 def build_env(
     map_path: str,
     *,
-    friction: float = 0.1,
+    friction: float = 0.9,
     max_episode_steps: int = 3000,
     reward_overrides: dict = None,
     early_terminate_backward_pct: float = 0.05,
@@ -78,7 +78,7 @@ def build_eval_env_set(
     Caller is responsible for `env.close()` (use `close_eval_env_set`).
     """
     env_kwargs = dict(env_kwargs or {})
-    return {p: build_env(p, friction=0.1, **env_kwargs) for p in map_paths}
+    return {p: build_env(p, friction=0.9, **env_kwargs) for p in map_paths}
 
 
 def close_eval_env_set(envs: dict[str, "CarRacingEnv"]) -> None:
@@ -91,7 +91,7 @@ def close_eval_env_set(envs: dict[str, "CarRacingEnv"]) -> None:
 # ---------------------------------------------------------------------------
 
 class MultiMapEnv:
-    """Random-sample-a-map-on-reset wrapper around N CarRacingEnv instances.
+    """Sample-a-map-on-reset wrapper around N CarRacingEnv instances.
 
     Not a Gymnasium subclass on purpose -- the action/observation spaces
     are identical across the underlying envs (same action set, same obs
@@ -101,9 +101,20 @@ class MultiMapEnv:
     Friction handling:
       - `friction_provider` is a callable `() -> float` invoked at every
         `reset()` to determine the friction of the upcoming episode.
-        For fixed friction, pass `lambda: 0.1`. For domain randomisation,
+        For fixed friction, pass `lambda: 0.9`. For domain randomisation,
         pass `lambda: rng.uniform(lo, hi)`. For curriculum, pass a
         closure over a step counter (see CurriculumScheduler below).
+
+    Map sampling (`map_sampling`):
+      - "balanced" (default): pick a map with probability inversely
+        proportional to the env-steps it has already contributed, so the
+        replay buffer ends up ~evenly split across maps. This counters the
+        skew where a map the policy finishes (long episodes) floods the
+        buffer while maps that crash early (short episodes) stay
+        under-represented. It's *softened* -- weighted-random rather than
+        argmin -- so every map keeps nonzero probability and a map the
+        policy can't crack can't monopolise training.
+      - "uniform": pick a map uniformly at random each episode (legacy).
     """
 
     def __init__(
@@ -112,17 +123,23 @@ class MultiMapEnv:
         friction_provider: Callable[[], float],
         env_kwargs: dict = None,
         seed: int = 0,
+        map_sampling: str = "balanced",
     ) -> None:
         if not map_paths:
             raise ValueError("MultiMapEnv needs at least one map_path.")
+        if map_sampling not in ("balanced", "uniform"):
+            raise ValueError(
+                f"map_sampling must be 'balanced' or 'uniform', got {map_sampling!r}"
+            )
         env_kwargs = dict(env_kwargs or {})
         # Use a fixed neutral friction at construction; the real friction
         # is set per-episode by friction_provider via reset().
         self.envs: list[CarRacingEnv] = [
-            build_env(p, friction=0.1, **env_kwargs) for p in map_paths
+            build_env(p, friction=0.9, **env_kwargs) for p in map_paths
         ]
         self.map_paths = list(map_paths)
         self.friction_provider = friction_provider
+        self.map_sampling = map_sampling
 
         # Both envs must agree on observation/action shape -- they do as
         # long as the action_set and ray config match, but be defensive.
@@ -140,18 +157,36 @@ class MultiMapEnv:
         # what each env does internally.
         self._map_rng = random.Random(seed)
         self._active_idx: int = 0
-        self._active_friction: float = 0.1
+        self._active_friction: float = 0.9
+        # Cumulative env-steps contributed by each map (drives "balanced"
+        # sampling and is exposed via `map_steps` for logging).
+        self._map_steps: list[int] = [0] * len(self.envs)
 
     # ---- gymnasium-style API ------------------------------------------
 
+    def _choose_map(self) -> int:
+        """Pick the next episode's map index per `map_sampling`."""
+        n = len(self.envs)
+        if self.map_sampling == "uniform" or n == 1:
+            return self._map_rng.randrange(n)
+        # "balanced": weight inversely to accumulated env-steps so selection
+        # pressure flows to under-represented maps. The +eps avoids a
+        # divide-by-zero on the first episode (all-zero -> uniform) and
+        # softens the weighting; weighted-random (not argmin) keeps every
+        # map reachable so a perpetually-crashing map can't monopolise.
+        eps = 1.0
+        weights = [1.0 / (s + eps) for s in self._map_steps]
+        return self._map_rng.choices(range(n), weights=weights, k=1)[0]
+
     def reset(self, seed: Optional[int] = None):
-        self._active_idx = self._map_rng.randrange(len(self.envs))
+        self._active_idx = self._choose_map()
         self._active_friction = float(self.friction_provider())
         env = self.envs[self._active_idx]
         env.set_friction(self._active_friction)
         return env.reset(seed=seed)
 
     def step(self, action):
+        self._map_steps[self._active_idx] += 1
         return self.envs[self._active_idx].step(action)
 
     def close(self):
@@ -167,6 +202,15 @@ class MultiMapEnv:
     @property
     def active_friction(self) -> float:
         return self._active_friction
+
+    @property
+    def map_steps(self) -> dict[str, int]:
+        """Cumulative env-steps contributed by each map so far.
+
+        Lets the training loop log how balanced the replay buffer is across
+        maps -- the metric "balanced" sampling exists to equalise.
+        """
+        return dict(zip(self.map_paths, self._map_steps))
 
 
 # ---------------------------------------------------------------------------
@@ -187,8 +231,8 @@ def domain_randomized_friction(
     Pass an explicit `rng` (seeded) so the sampled sequence is
     reproducible across runs.
     """
-    if not (0.0 <= low <= high < 1.0):
-        raise ValueError(f"need 0 <= low <= high < 1; got {low}, {high}")
+    if not (0.0 < low <= high <= 1.0):
+        raise ValueError(f"need 0 < low <= high <= 1; got {low}, {high}")
     r = rng if rng is not None else random.Random()
     return lambda: r.uniform(low, high)
 

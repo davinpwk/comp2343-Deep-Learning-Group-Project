@@ -111,26 +111,28 @@ def test_env_constructs_on_each_map():
 
 def test_set_friction_changes_friction():
     env = CarRacingEnv(map_path=MAPS[0], max_steps=200)
-    env.set_friction(0.1)
-    assert env.friction == 0.1
+    env.set_friction(0.9)
+    assert env.friction == 0.9
     assert env.slippery is False
-    env.set_friction(0.95)
-    assert env.friction == 0.95
+    env.set_friction(0.05)
+    assert env.friction == 0.05
     assert env.slippery is True
-    # Bounds enforcement
+    # Bounds enforcement: 0.0 is degenerate (target velocity never reached)
     try:
-        env.set_friction(1.0)
+        env.set_friction(0.0)
     except ValueError:
         pass
     else:
-        raise AssertionError("set_friction(1.0) should have raised")
+        raise AssertionError("set_friction(0.0) should have raised")
     env.close()
 
 
 def test_multi_map_samples_uniformly_and_is_reproducible():
-    provider = fixed_friction(0.1)
-    e1 = MultiMapEnv(MAPS, provider, env_kwargs=dict(max_episode_steps=100), seed=0)
-    e2 = MultiMapEnv(MAPS, provider, env_kwargs=dict(max_episode_steps=100), seed=0)
+    provider = fixed_friction(FRICTION_NORMAL)
+    e1 = MultiMapEnv(MAPS, provider, env_kwargs=dict(max_episode_steps=100),
+                     seed=0, map_sampling="uniform")
+    e2 = MultiMapEnv(MAPS, provider, env_kwargs=dict(max_episode_steps=100),
+                     seed=0, map_sampling="uniform")
 
     seq1, seq2 = [], []
     for _ in range(60):
@@ -150,38 +152,74 @@ def test_multi_map_samples_uniformly_and_is_reproducible():
     e2.close()
 
 
+def test_balanced_sampling_favours_under_stepped_maps():
+    """'balanced' sampling should steer selection toward maps that have
+    contributed the fewest env-steps, while keeping every map reachable
+    (softened weighted-random, not a hard argmin)."""
+    provider = fixed_friction(FRICTION_NORMAL)
+    env = MultiMapEnv(MAPS, provider, env_kwargs=dict(max_episode_steps=50),
+                      seed=0, map_sampling="balanced")
+    try:
+        # Simulate a heavy imbalance: map 0 has flooded the buffer.
+        env._map_steps = [10_000, 50, 50]
+        picks = Counter(env._choose_map() for _ in range(3_000))
+        # Flooded map should be picked far less than the two starved maps...
+        assert picks[0] < picks[1] and picks[0] < picks[2], picks
+        assert picks[0] < 0.05 * 3_000, f"flooded map over-selected: {picks}"
+        # ...but still reachable (nonzero prob -- not a hard argmin).
+        assert set(picks) == {0, 1, 2}, f"a map became unreachable: {picks}"
+    finally:
+        env.close()
+
+
+def test_uniform_sampling_ignores_step_counts():
+    """'uniform' sampling must NOT react to accumulated step counts."""
+    provider = fixed_friction(FRICTION_NORMAL)
+    env = MultiMapEnv(MAPS, provider, env_kwargs=dict(max_episode_steps=50),
+                      seed=0, map_sampling="uniform")
+    try:
+        env._map_steps = [10_000, 50, 50]  # should be ignored
+        picks = Counter(env._choose_map() for _ in range(3_000))
+        # Roughly even across all three despite the imbalance.
+        for i in range(3):
+            assert picks[i] > 0.20 * 3_000, f"uniform skewed: {picks}"
+    finally:
+        env.close()
+
+
 def test_dr_provider_stays_in_range():
     import random as pyrnd
     rng = pyrnd.Random(7)
-    prov = domain_randomized_friction(0.1, 0.95, rng=rng)
+    prov = domain_randomized_friction(0.05, 0.9, rng=rng)
     vals = [prov() for _ in range(500)]
-    assert min(vals) >= 0.1 and max(vals) <= 0.95, f"DR out of range: {min(vals)} {max(vals)}"
+    assert min(vals) >= 0.05 and max(vals) <= 0.9, f"DR out of range: {min(vals)} {max(vals)}"
     # Some spread expected
     assert max(vals) - min(vals) > 0.3, "DR not exploring enough range"
 
 
 def test_curriculum_scheduler_linear():
-    sched = CurriculumScheduler(start=0.1, end=0.95, total_env_steps=1000)
-    assert sched.current_friction() == 0.1
+    # Ramp grippy (normal) -> slippery, matching the curriculum direction.
+    sched = CurriculumScheduler(start=0.9, end=0.05, total_env_steps=1000)
+    assert sched.current_friction() == 0.9
     sched.tick(500)
     midpoint = sched.current_friction()
-    assert abs(midpoint - (0.1 + 0.95) / 2) < 1e-6, f"midpoint wrong: {midpoint}"
+    assert abs(midpoint - (0.9 + 0.05) / 2) < 1e-6, f"midpoint wrong: {midpoint}"
     sched.tick(500)
-    assert sched.current_friction() == 0.95
+    assert abs(sched.current_friction() - 0.05) < 1e-9
     sched.tick(1)
     # Saturates at the endpoint
-    assert sched.current_friction() == 0.95
+    assert abs(sched.current_friction() - 0.05) < 1e-9
 
 
 def test_curriculum_provider_applied_in_multi_env():
-    sched = CurriculumScheduler(start=0.1, end=0.95, total_env_steps=10)
+    sched = CurriculumScheduler(start=0.9, end=0.05, total_env_steps=10)
     env = MultiMapEnv([MAPS[0]], sched.provider,
                       env_kwargs=dict(max_episode_steps=10), seed=0)
     env.reset()
-    assert env.active_friction == 0.1
+    assert env.active_friction == 0.9
     sched.tick(10)
     env.reset()
-    assert env.active_friction == 0.95
+    assert abs(env.active_friction - 0.05) < 1e-9
     env.close()
 
 
@@ -322,7 +360,7 @@ def test_step_based_budget_terminates_exactly():
     save_dir = tempfile.mkdtemp(prefix="phase0_train_")
     cfg = ExperimentConfig(
         friction_mode="fixed",
-        friction=0.1,
+        friction=FRICTION_NORMAL,
         map_paths=(MAPS[0],),                  # one map -> fast
         max_episode_steps=200,
         max_env_steps=2_000,                   # tiny budget
@@ -361,7 +399,7 @@ def test_train_loads_pretrained_checkpoint():
     save_dir = tempfile.mkdtemp(prefix="phase0_finetune_")
     cfg_pre = ExperimentConfig(
         friction_mode="fixed",
-        friction=0.1,
+        friction=FRICTION_NORMAL,
         map_paths=(MAPS[0],),
         max_episode_steps=150,
         max_env_steps=800,
@@ -383,8 +421,8 @@ def test_train_loads_pretrained_checkpoint():
 
     cfg_ft = ExperimentConfig(
         friction_mode="curriculum",
-        friction_curr_start=0.1,
-        friction_curr_end=0.95,
+        friction_curr_start=FRICTION_NORMAL,
+        friction_curr_end=FRICTION_SLIPPERY,
         map_paths=(MAPS[0],),
         max_episode_steps=150,
         max_env_steps=400,
@@ -418,6 +456,8 @@ def main():
         ("env constructs on each map",          test_env_constructs_on_each_map),
         ("set_friction",                        test_set_friction_changes_friction),
         ("MultiMapEnv sampling+reproducibility", test_multi_map_samples_uniformly_and_is_reproducible),
+        ("balanced sampling favours starved maps", test_balanced_sampling_favours_under_stepped_maps),
+        ("uniform sampling ignores step counts", test_uniform_sampling_ignores_step_counts),
         ("DR provider range",                   test_dr_provider_stays_in_range),
         ("curriculum scheduler linear",         test_curriculum_scheduler_linear),
         ("curriculum applied via MultiMapEnv",  test_curriculum_provider_applied_in_multi_env),

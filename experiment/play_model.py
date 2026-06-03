@@ -9,7 +9,7 @@ Usage (from project root):
 
     # Override the map and/or friction.
     python -m experiment.play_model --run runs/phase1_pilot_slippery/seed_0 \
-        --map maps/winding_frequent.txt --friction 0.95
+        --map maps/winding_frequent.txt --friction 0.05
 
     # Or point at a bare checkpoint (config.json in the same dir is optional).
     python -m experiment.play_model --ckpt checkpoints/pretrained_normal_seed_0.pt \
@@ -48,20 +48,20 @@ def _pick_friction(config: dict, override: float | None) -> float:
     """Decide what friction to demo at.
 
     Priority: --friction CLI > config's `friction` (if fixed mode) >
-    `friction_curr_end` (curriculum) > midpoint of DR range > 0.1.
+    `friction_curr_end` (curriculum) > midpoint of DR range > 0.9.
     """
     if override is not None:
         return float(override)
     mode = config.get("friction_mode", "fixed")
     if mode == "fixed":
-        return float(config.get("friction", 0.1))
+        return float(config.get("friction", 0.9))
     if mode == "curriculum":
-        return float(config.get("friction_curr_end", 0.95))
+        return float(config.get("friction_curr_end", 0.05))
     if mode == "dr":
-        lo = float(config.get("friction_dr_low", 0.1))
-        hi = float(config.get("friction_dr_high", 0.95))
+        lo = float(config.get("friction_dr_low", 0.05))
+        hi = float(config.get("friction_dr_high", 0.9))
         return 0.5 * (lo + hi)
-    return 0.1
+    return 0.9
 
 
 def main():

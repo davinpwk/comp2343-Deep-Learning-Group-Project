@@ -21,9 +21,11 @@ from typing import Any
 
 # Surface tile-friction presets here so consumers don't need to import
 # car_env just to know what "normal" or "slippery" means.
-FRICTION_NORMAL: float = 0.1
-FRICTION_SLIPPERY: float = 0.95
-FRICTION_DR_RANGE: tuple = (FRICTION_NORMAL, FRICTION_SLIPPERY)
+# `friction` is the grip coefficient: higher = more grip / less slip.
+FRICTION_NORMAL: float = 0.9    # grippy road (pretrain)
+FRICTION_SLIPPERY: float = 0.05  # icy road    (transfer target)
+# Ordered (low, high) so it can be passed straight to a Uniform sampler.
+FRICTION_DR_RANGE: tuple = (FRICTION_SLIPPERY, FRICTION_NORMAL)
 
 
 @dataclass
@@ -51,13 +53,21 @@ class ExperimentConfig:
     friction_curr_end: float = FRICTION_SLIPPERY
 
     # === maps ==========================================================
-    # Paths relative to project root. Episodes pick one map uniformly at
-    # random; if a single path is given, that map is used every episode.
+    # Paths relative to project root. The per-episode map is chosen by
+    # `map_sampling` below; if a single path is given, that map is used
+    # every episode regardless.
     map_paths: tuple = (
         "maps/winding.txt",
         "maps/winding_frequent.txt",
         "maps/winding_varying_width.txt",
     )
+    # How episodes pick a map (see env_utils.MultiMapEnv):
+    #   "balanced" -> sample inversely to accumulated env-steps per map, so
+    #                 the replay buffer ends up ~evenly split across maps.
+    #                 Softened (weighted-random, not argmin) so a map the
+    #                 policy can't crack can't monopolise training.
+    #   "uniform"  -> uniformly at random each episode (legacy behaviour).
+    map_sampling: str = "balanced"
 
     # === per-episode env knobs ========================================
     max_episode_steps: int = 3000
@@ -69,10 +79,10 @@ class ExperimentConfig:
 
     # === DQN / optimiser ==============================================
     gamma: float = 0.99
-    lr: float = 5e-4
+    lr: float = 3e-4
     batch_size: int = 64
     buffer_capacity: int = 100_000
-    target_update_freq: int = 3000
+    target_update_freq: int = 5000
     epsilon_start: float = 1.0
     epsilon_end: float = 0.05
     epsilon_decay_steps: int = 100_000
@@ -87,6 +97,12 @@ class ExperimentConfig:
     # Friction values to evaluate at every checkpoint. Slippery and normal
     # by default so catastrophic forgetting is measured for free.
     eval_frictions: tuple = (FRICTION_NORMAL, FRICTION_SLIPPERY)
+    # When True, the training loop also dumps the agent's weights to
+    # <run_dir>/ckpt_step_<env_steps>.pt at every eval checkpoint, not just at
+    # the end. Lets downstream analysis replay how the policy looked after each
+    # training increment (e.g. render rollouts per checkpoint). Off by default
+    # since it multiplies a run's on-disk footprint by ~(#eval points).
+    save_checkpoint_every_eval: bool = False
 
     # === misc ==========================================================
     seed: int = 42

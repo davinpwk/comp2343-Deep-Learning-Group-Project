@@ -1,0 +1,46 @@
+{
+  "friction_mode": "fixed",
+  "friction": 0.05,
+  "friction_dr_low": 0.05,
+  "friction_dr_high": 0.9,
+  "friction_curr_start": 0.9,
+  "friction_curr_end": 0.05,
+  "map_paths": [
+    "maps/winding.txt",
+    "maps/winding_frequent.txt",
+    "maps/winding_varying_width.txt"
+  ],
+  "map_sampling": "balanced",
+  "max_episode_steps": 3000,
+  "reward_overrides": {},
+  "early_terminate_backward_pct": 0.05,
+  "early_terminate_stagnation_steps": 300,
+  "align_spawn_to_tangent": true,
+  "action_set": "no_noop",
+  "gamma": 0.99,
+  "lr": 0.0001,
+  "batch_size": 64,
+  "buffer_capacity": 100000,
+  "target_update_freq": 5000,
+  "epsilon_start": 1.0,
+  "epsilon_end": 0.05,
+  "epsilon_decay_steps": 180000,
+  "hidden_sizes": [
+    128,
+    128
+  ],
+  "grad_clip": 10.0,
+  "max_env_steps": 300000,
+  "warmup_env_steps": 1000,
+  "eval_every_env_steps": 4000,
+  "eval_n_episodes": 1,
+  "eval_frictions": [
+    0.9,
+    0.05
+  ],
+  "save_checkpoint_every_eval": true,
+  "seed": 101,
+  "device": "cpu",
+  "save_dir": "runs",
+  "run_name": "phase3_final/B-slippery"
+}
