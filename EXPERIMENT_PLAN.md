@@ -7,7 +7,7 @@ Three tracks already exist as text files in `maps/`:
 - `winding_frequent.txt` (T2 — frequent smooth winding; replaced the original triangle-wave zigzag, which was too hard to learn)
 - `winding_varying_width.txt` (T3)
 
-During training, sample a map uniformly at random per episode. Spawn position and heading remain at env defaults (no randomization).
+During training, the per-episode map is selected by **balanced sampling** (`map_sampling = "balanced"`): maps are drawn weighted inversely to the env-steps already accumulated on each (softened to weighted-random rather than strict argmin), so the replay buffer ends up roughly evenly split across the three maps and no single map can monopolise training. The map-choice RNG is seeded with the training seed for reproducibility. Spawn heading is aligned to the track tangent (`align_spawn_to_tangent = True`); spawn position stays at env defaults.
 
 **Friction settings used across the plan** (`friction` = grip coefficient, higher value = more grip / less slip, per `car_env.py`):
 - Normal: `friction = 0.9`
@@ -26,6 +26,8 @@ All budgets are measured in **environment steps**, not episodes.
 Set the budget unit:
 - `N := N_norm`
 - Verify `2N ≥ N_slip`. If not, bump `N` so that `2N` comfortably covers slippery convergence; report this in the methodology.
+
+**Locked values (Phase 1 result, `runs/_phase1_calibration.json`):** `N_norm = 150,000`, `N_slip = 300,000`, so `N = 150,000` and `2N = 300,000 ≥ N_slip` — no bump needed. Eval cadence `X = 4,000` (~37 eval points per N-step run, ~75 per 2N run). Key consequence used throughout: **slippery does not converge until ~2N**, so any run given only `N` steps of slippery is below the task's convergence point.
 
 ## 3. Baselines (from-scratch)
 
@@ -46,9 +48,11 @@ All start from a B-normal checkpoint. Four conditions form a 2×2 ablation:
 | **Direct transfer** (friction jumps 0.9 → 0.05) | E1 | E2 |
 | **Curriculum transfer** (friction 0.9 → 0.05 linear) | E3 | E4 |
 
-Each fine-tune uses budget `N`. Total compute per transfer condition: `N (pretrain) + N (fine-tune) = 2N`, matching the baseline budgets.
+Each fine-tune uses budget **`2N`** — the same target-task (slippery) interaction the from-scratch `B-slippery`/`B-DR` baselines get, since slippery needs ~2N to converge (§2). Total compute per transfer condition is therefore `N (pretrain) + 2N (fine-tune) = 3N`.
 
-**Curriculum schedule:** linear ramp of `env.friction` from 0.9 to 0.05 over the `N` fine-tune steps. One fixed schedule — do not search over schedules; that's a separate research question.
+**Fairness framing.** The research question is whether normal-pretraining yields a *better starting point* for learning slippery than random init, given equal adaptation budget. We therefore match on **target-task (fine-tune) budget**, not total compute: transfer and the from-scratch slippery/DR baselines each see `2N` slippery steps. The shared B-normal checkpoint is treated as a reusable, **amortised** cost (one checkpoint feeds all four transfer conditions), so we do not charge its `N` pretrain steps against the comparison. The matched-*total*-compute reading (transfer's `N`-step fine-tune slice — i.e. `2N` total — vs the `2N` baselines) remains recoverable from the logged eval curves and is reported as a secondary view.
+
+**Curriculum schedule:** linear ramp of `env.friction` from 0.9 to 0.05 over the `2N` fine-tune steps (the ramp spans `max_env_steps`, so it stretches automatically with the budget). One fixed schedule — do not search over schedules; that's a separate research question.
 
 ## 5. Hyperparameter search
 
@@ -61,10 +65,10 @@ Each fine-tune uses budget `N`. Total compute per transfer condition: `N (pretra
 - LR ∈ {1e-3, 3e-4, 1e-4}
 - ε-decay end-step ∈ {30% of budget, 60% of budget}
 
-*Fine-tune grid* (~6 configs), constrained for warm-start:
+*Fine-tune grid* (9 configs = 3 LR × 3 ε-start), constrained for warm-start:
 - LR ∈ {3e-4, 1e-4, 3e-5} — strictly ≤ pretrain LR range
 - ε-start ∈ {0.5, 0.2, 0.05} — not 1.0
-- ε-decay short (~30% of fine-tune budget)
+- ε-decay short (30% of fine-tune budget; = 90k steps at the `2N` fine-tune budget)
 
 **Search protocol:**
 - 3 validation seeds per config
@@ -81,7 +85,7 @@ For each of the 7 conditions (3 baselines + 4 transfer variants):
 3. Every `X` env steps (pick `X` so you get ~30–50 eval points across the run), pause and evaluate.
 
 **Evaluation protocol per checkpoint:**
-- 10 greedy (ε=0) episodes per (map × friction) cell
+- **1 greedy (ε=0) episode per (map × friction) cell.** The env transitions and the greedy policy are deterministic (no env RNG), so a single episode reproduces the 10-episode mean *exactly* — this is a 10× eval-compute saving over the original 10-episode spec. (`eval_n_episodes = 1` across all phases; the per-cell ± shown in logs is the spread across the 3 maps, not across episodes.)
 - Run on **all 3 maps × both friction conditions** (normal + slippery):
   - Slippery eval = primary target performance
   - Normal eval = catastrophic-forgetting probe (mandatory, not optional)
@@ -100,11 +104,13 @@ For each condition, report:
 
 Sharing the B-normal pretrained checkpoint across the 4 transfer conditions:
 
-- HP search: 7 conditions × 6 configs × 3 seeds = **126 search runs**
-- Final eval: 7 conditions × 5 seeds = **35 final runs**
-- **Total: ~161 runs**
+- HP search — baselines: 3 conditions (B-normal/B-slippery/B-DR) × 6 configs × 3 seeds = **54 runs**
+- HP search — fine-tune: 4 conditions (E1–E4) × 9 configs × 3 seeds = **108 runs**
+- Phase-2 pretrain (§2.3): 3 seeds = **3 runs**
+- Final eval: 7 conditions × 5 seeds = **35 runs** (B-normal final = the §3.1 re-pretrain)
+- **Total: ~200 runs**
 
-Each search run can use a shorter budget (e.g., 50% of full) since AUC is informative early; final runs use the full budget. Estimate single-run wall-clock before committing.
+Run counts understate fine-tune cost: the baseline search/finals run at `N`–`2N`, but the fine-tune search and the E1–E4 finals each run at the **`2N` fine-tune budget**. The HP search was executed at **full budget** (not the 50%-budget shortcut), since the eval is cheap (1 episode/cell, deterministic). Estimate single-run wall-clock before committing.
 
 ---
 
@@ -188,7 +194,7 @@ For each of E1 (direct, full), E2 (direct, freeze-1st), E3 (curriculum, full), E
 - For each fine-tune HP config × 3 validation seeds:
   - Load the pretrained checkpoint matching the seed (one of the three from §2.3).
   - Apply freeze logic if applicable.
-  - Run the fine-tune for `N` env steps under the appropriate friction regime (constant 0.05 for direct, linear ramp for curriculum).
+  - Run the fine-tune for `2N` env steps under the appropriate friction regime (constant 0.05 for direct, linear ramp for curriculum). The search runs at the same `2N` budget the final transfer runs use, so the winning ε-decay (30% → 90k steps) and curriculum ramp are tuned at the deployment budget.
 - Pick the winning config per condition by AUC on slippery eval.
 
 ## Phase 3 — Final evaluation
@@ -201,7 +207,7 @@ For each of E1 (direct, full), E2 (direct, freeze-1st), E3 (curriculum, full), E
 - B-normal (5 seeds, already done in §3.1)
 - B-slippery (5 fresh seeds, budget `2N`, winning HPs)
 - B-DR (5 fresh seeds, budget `2N`, winning HPs)
-- E1–E4 (5 fresh seeds each, load pretrained checkpoints, apply respective fine-tune protocol with winning HPs)
+- E1–E4 (5 fresh seeds each, budget `2N` fine-tune, load pretrained checkpoints, apply respective fine-tune protocol with winning HPs)
 
 For each run, eval every `X` env steps on all 3 maps × both friction conditions.
 
@@ -217,12 +223,12 @@ Compute the §7 reported metrics per condition: final mean return on slippery, A
 - Optional: AUC bar chart with seed-level error bars.
 
 ### 4.2 Methodology paragraph
-> "We compare three from-scratch baselines (normal, slippery, domain-randomized friction ~ U(0.1, 0.95)) against four transfer variants pretrained on normal friction: direct vs. curriculum fine-tuning, each with full retraining or first-layer freezing. Budgets are anchored to the from-scratch normal convergence point N (in environment steps); transfer conditions use N for pretraining and N for fine-tuning, while from-scratch slippery/DR baselines use 2N to match total compute. Hyperparameters were tuned per condition by AUC of the slippery eval curve over 3 validation seeds, with a separate constrained grid for fine-tuning. Final results use 5 held-out seeds. Evaluation runs every X env steps on all 3 maps under both friction conditions; the normal-friction evaluation of fine-tuned models is reported as a catastrophic-forgetting measurement."
+> "We compare three from-scratch baselines (normal, slippery, and domain-randomised friction ~ U(0.05, 0.9)) against four transfer variants pretrained on normal friction: direct vs. curriculum fine-tuning, each with full retraining or first-layer freezing. Budgets are anchored to the from-scratch normal convergence point N = 150,000 environment steps (Phase 1); the from-scratch slippery and DR baselines train for 2N, as slippery does not converge until ~2N. Each transfer variant pretrains on normal for N steps and then fine-tunes on the target regime for 2N steps — the same target-task budget the slippery/DR baselines receive — for 3N total compute. We treat the shared normal-pretraining checkpoint as a reusable, amortised cost and match the headline comparison on adaptation (target-task) budget rather than total compute; the matched-total-compute reading is recoverable from the N-step slice of each fine-tune curve. Hyperparameters were tuned per condition by AUC of the slippery eval curve over 3 validation seeds, with a separate constrained grid for fine-tuning. Final results use 5 held-out seeds. The greedy evaluation is deterministic (no env RNG), so we evaluate 1 episode per (map × friction) cell every X = 4,000 env steps on all 3 maps under both frictions; the normal-friction evaluation of fine-tuned models is reported as a catastrophic-forgetting measurement."
 
 ### 4.3 Limitations to state explicitly
-- 5 seeds is the minimum for error bars; we do not make significance claims.
+- 5 seeds (and 1 eval episode/cell) is the minimum for error bars; eval variance across seeds is large, so we say "matches"/"trails", not "beats", and make no significance claims.
 - Curriculum schedule is fixed at linear; ablating the schedule is out of scope.
-- Fine-tuning conditions see more total environment interaction than the from-scratch normal baseline; we anchor comparisons to target-task sample efficiency, not total compute, and provide 2N from-scratch baselines for slippery and DR as the matched-compute control.
+- Transfer conditions use **3N total compute** (N pretrain + 2N fine-tune) vs the from-scratch baselines' 2N. We treat pretraining as a reusable, amortised cost and match the headline comparison on **adaptation (target-task) budget** — transfer and the from-scratch slippery/DR baselines each get 2N of slippery interaction. The matched-total-compute view (transfer's N-step fine-tune slice vs the 2N baselines) is reported as a secondary reading from the same curves. We therefore claim a *starting-point/sample-efficiency* result under amortised pretraining, **not** a total-compute win.
 - Single curriculum shape, single freeze granularity; richer ablations are future work.
 
 ## Pre-flight checklist (run all of these before launching Phase 2)
