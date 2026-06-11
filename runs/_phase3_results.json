@@ -9,7 +9,7 @@
     105
   ],
   "eval_n_episodes": 1,
-  "phase2_results": "runs\\_phase2_results.json",
+  "phase2_results": "runs/_phase2_results.json",
   "report": {
     "B-normal": {
       "is_transfer": false,
