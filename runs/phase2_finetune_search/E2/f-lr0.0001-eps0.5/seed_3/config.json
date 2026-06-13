@@ -24,13 +24,13 @@
   "target_update_freq": 5000,
   "epsilon_start": 0.5,
   "epsilon_end": 0.05,
-  "epsilon_decay_steps": 45000,
+  "epsilon_decay_steps": 90000,
   "hidden_sizes": [
     128,
     128
   ],
   "grad_clip": 10.0,
-  "max_env_steps": 150000,
+  "max_env_steps": 300000,
   "warmup_env_steps": 1000,
   "eval_every_env_steps": 4000,
   "eval_n_episodes": 1,
@@ -38,6 +38,7 @@
     0.9,
     0.05
   ],
+  "save_checkpoint_every_eval": false,
   "seed": 3,
   "device": "cpu",
   "save_dir": "runs",
